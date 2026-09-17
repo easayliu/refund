@@ -41,6 +41,32 @@ export function extractToken(raw: string): string {
   return s.replace(/^["',]+|["',]+$/g, '').trim()
 }
 
+const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
+
+/**
+ * 从一段文本里找出所有 access_token，去重后按出现顺序返回——批量提交的入口。
+ *
+ * 不按行拆：用户可能把好几段 session JSON 连着粘、或者一行里逗号隔开好几个 token，行边界
+ * 不可靠；直接按 JWT 的形态（`eyJ` 开头的三段 base64url）扫描最稳。整段 session JSON 里
+ * 只有 accessToken 一处是 JWT，所以扫出来的就是它。一个都没扫到时退回单条的宽松规整逻辑，
+ * 让后续 [`previewToken`] 报出「格式不对」而不是这里静默吞掉。
+ */
+export function splitTokens(raw: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const tok of raw.match(JWT_RE) ?? []) {
+    if (!seen.has(tok)) {
+      seen.add(tok)
+      out.push(tok)
+    }
+  }
+  if (out.length === 0) {
+    const one = extractToken(raw)
+    if (one) out.push(one)
+  }
+  return out
+}
+
 /** 解析失败返回 `{ error }`，成功返回 `{ preview }`。 */
 export function previewToken(raw: string): { preview: TokenPreview } | { error: 'format' | 'issuer' } {
   const token = extractToken(raw)

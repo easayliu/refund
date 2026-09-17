@@ -30,7 +30,13 @@
 任务时提交直接复用；启动时 `fail_interrupted_jobs` 把上次遗留的 pending/running 判为失败。
 `/api/refund/jobs/:id` 额外返回 `queue_ahead`（同母号前面还有几个），用户页据此显示排队。
 
-**用户 token 不落库**：`submit_refund` 只把它在内存里传给后台任务，跑完即弃。库里只留
+**批量提交**：`POST /api/refund/submit-batch` 接 `user_ats` 数组（上限 `MAX_BATCH`=50），逐条走
+与单条同一个 `enqueue_refund`，返回按位置对应的 `{index, job_id | error}`，一条无效不影响其余。
+`GET /api/refund/jobs?ids=1,2,3` 一次查一批（查不到的略过）。用户页输入框里扫到多个 JWT
+（`lib/jwt.ts` 的 `splitTokens`）就自动切批量模式：本地预检（格式/签发方/过期/缺邮箱）没过的
+行不发后端，直接标失败原因；整批进度记在 localStorage `refund_batch`，与单条的 `refund_job_id` 互斥。
+
+**用户 token 不落库**：`enqueue_refund` 只把它在内存里传给后台任务，跑完即弃。库里只留
 任务的步骤日志与用户邮箱/id。母号 token 明文存库（要用来发请求），按敏感文件对待。
 
 ## 前端（`admin-ui/src/`）

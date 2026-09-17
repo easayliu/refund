@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     routing::{delete, get, post},
@@ -75,8 +75,10 @@ pub async fn run(
         .route("/auth/setup", post(auth::setup))
         // 服务是否就绪（是否已配置可用母号）——用户页据此提示。
         .route("/service/status", get(service_status))
-        // 用户提交退款、按 id 轮询任务。
+        // 用户提交退款（单条 / 批量）、按 id 轮询任务（单条 / 批量）。
         .route("/refund/submit", post(submit_refund))
+        .route("/refund/submit-batch", post(submit_refund_batch))
+        .route("/refund/jobs", get(get_jobs))
         .route("/refund/jobs/{id}", get(get_job));
 
     // 需管理鉴权的接口（未设密码时中间件放行）。
@@ -142,15 +144,71 @@ struct SubmitResp {
 }
 
 /// 用户提交退款：解析 user AT → 选一个可用母号 → 建任务 → 后台跑四步流程 → 返回 job_id。
-///
-/// **不持久化 user AT**：它只在内存里传给后台任务，跑完即弃。库里只留任务的步骤日志与用户的
-/// 邮箱/id（用于展示与去重排查），不留可复用的凭证。
 async fn submit_refund(
     State(state): State<AppState>,
     Json(req): Json<SubmitReq>,
 ) -> Result<Json<SubmitResp>, ApiError> {
+    let job_id = enqueue_refund(&state, &req.user_at)?;
+    Ok(Json(SubmitResp { job_id }))
+}
+
+/// 一次批量提交最多接多少条。用户页一次粘几十个 token 是合理的；再多就该分批，否则一个请求
+/// 里同步解析上百份 JWT 加建任务，接口响应会拖长，前端也没法给出有意义的逐条反馈。
+const MAX_BATCH: usize = 50;
+
+#[derive(Deserialize)]
+struct SubmitBatchReq {
+    /// 多份用户 access_token，每项形态同单条提交（裸 token / Bearer / 整段 session JSON）。
+    user_ats: Vec<String>,
+}
+
+/// 批量提交里每一条的结果：成功给 `job_id`，失败给 `error`。位置与请求数组一一对应，前端据此
+/// 把结果贴回对应的输入行。
+#[derive(Serialize)]
+struct BatchItem {
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// 用户批量提交退款。**逐条独立**：一条 token 无效不影响其余条目入队，整体只在请求形态本身
+/// 不合法（空数组 / 超过 [`MAX_BATCH`]）时才整体拒绝。每条各自走 [`enqueue_refund`]，因此
+/// 分派母号、同用户去重、按母号串行这些规则与单条提交完全一致——批量只是在接口层把 N 次
+/// 单条提交合并成一个请求，并不引入新的执行语义。
+async fn submit_refund_batch(
+    State(state): State<AppState>,
+    Json(req): Json<SubmitBatchReq>,
+) -> Result<Json<Vec<BatchItem>>, ApiError> {
+    if req.user_ats.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "user_ats 不能为空".into()));
+    }
+    if req.user_ats.len() > MAX_BATCH {
+        return Err((StatusCode::BAD_REQUEST, format!("一次最多提交 {MAX_BATCH} 条")));
+    }
+    let items = req
+        .user_ats
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| match enqueue_refund(&state, raw) {
+            Ok(job_id) => BatchItem { index, job_id: Some(job_id), error: None },
+            Err((_, msg)) => BatchItem { index, job_id: None, error: Some(msg) },
+        })
+        .collect::<Vec<_>>();
+    let ok = items.iter().filter(|i| i.job_id.is_some()).count();
+    tracing::info!(total = items.len(), ok, "批量提交");
+    Ok(Json(items))
+}
+
+/// 单条提交的本体：解析 user AT → 选一个可用母号 → 建任务 → 后台跑四步流程 → 返回 job_id。
+/// 单条与批量接口共用，保证两条路径上的校验与排队规则一字不差。
+///
+/// **不持久化 user AT**：它只在内存里传给后台任务，跑完即弃。库里只留任务的步骤日志与用户的
+/// 邮箱/id（用于展示与去重排查），不留可复用的凭证。
+fn enqueue_refund(state: &AppState, raw_at: &str) -> Result<i64, ApiError> {
     // 接受整段 session JSON / 带 Bearer 前缀等形态，见 [`jwt::extract_token`]。
-    let user_at = jwt::extract_token(&req.user_at);
+    let user_at = jwt::extract_token(raw_at);
     if user_at.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "user AT 不能为空".into()));
     }
@@ -168,7 +226,7 @@ async fn submit_refund(
     // 同一用户已有未完成任务 → 直接把那个任务还给它，不再排第二趟。
     if let Some(job_id) = state.store.find_open_job_for_user(&user_id).map_err(internal)? {
         tracing::info!(job_id, user = %user_email, "用户已有进行中的任务，复用");
-        return Ok(Json(SubmitResp { job_id }));
+        return Ok(job_id);
     }
 
     // 选一个可用母号（排队最少的那个）。
@@ -216,7 +274,7 @@ async fn submit_refund(
         tracing::info!(job_id, status, user = %user_email, "退款流程结束");
     });
 
-    Ok(Json(SubmitResp { job_id }))
+    Ok(job_id)
 }
 
 /// 任务 + 排队信息。`queue_ahead` 是同母号队列里排在它前面的未完成任务数，前端据此显示
@@ -240,6 +298,40 @@ async fn get_job(
         .ok_or((StatusCode::NOT_FOUND, "任务不存在".to_string()))?;
     let queue_ahead = state.store.queue_ahead(&job).map_err(internal)?;
     Ok(Json(JobView { job, queue_ahead }))
+}
+
+/// 一次批量查询最多接多少个 id。与 [`MAX_BATCH`] 同量级即可——用户页一次批量提交的任务数
+/// 不会超过它；再宽只是给人拿公开接口扫库留口子。
+const MAX_QUERY_IDS: usize = 100;
+
+#[derive(Deserialize)]
+struct JobsQuery {
+    /// 逗号分隔的任务 id 列表，如 `ids=3,4,5`。
+    ids: String,
+}
+
+/// 批量按 id 查任务（公开，批量提交后前端一次轮询一批）。查不到的 id 直接略过，不报错——
+/// 批量场景里个别任务被清掉不该让整批轮询失败，前端按「返回里没有」处理。
+async fn get_jobs(
+    State(state): State<AppState>,
+    Query(q): Query<JobsQuery>,
+) -> Result<Json<Vec<JobView>>, ApiError> {
+    let ids = q
+        .ids
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect::<Vec<_>>();
+    if ids.len() > MAX_QUERY_IDS {
+        return Err((StatusCode::BAD_REQUEST, format!("一次最多查询 {MAX_QUERY_IDS} 个任务")));
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(job) = state.store.get_job(id).map_err(internal)? {
+            let queue_ahead = state.store.queue_ahead(&job).map_err(internal)?;
+            out.push(JobView { job, queue_ahead });
+        }
+    }
+    Ok(Json(out))
 }
 
 // ============ 管理接口 ============

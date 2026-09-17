@@ -1,6 +1,6 @@
 [package]
 name = "refund"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "ChatGPT Team 去除个人空间自动化：网页提交 user AT，管理员配置 admin AT，后端跑完邀请→接受→去个人空间→踢出的四步流程"
 
