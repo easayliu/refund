@@ -316,11 +316,7 @@ async fn get_jobs(
     State(state): State<AppState>,
     Query(q): Query<JobsQuery>,
 ) -> Result<Json<Vec<JobView>>, ApiError> {
-    let ids = q
-        .ids
-        .split(',')
-        .filter_map(|s| s.trim().parse::<i64>().ok())
-        .collect::<Vec<_>>();
+    let ids = q.ids.split(',').filter_map(|s| s.trim().parse::<i64>().ok()).collect::<Vec<_>>();
     if ids.len() > MAX_QUERY_IDS {
         return Err((StatusCode::BAD_REQUEST, format!("一次最多查询 {MAX_QUERY_IDS} 个任务")));
     }
