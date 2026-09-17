@@ -1,0 +1,30 @@
+[package]
+name = "refund"
+version = "0.1.0"
+edition = "2024"
+description = "ChatGPT Team 去除个人空间自动化：网页提交 user AT，管理员配置 admin AT，后端跑完邀请→接受→去个人空间→踢出的四步流程"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+base64 = "0.22.1"
+clap = { version = "4.6.4", features = ["derive", "env"] }
+dirs = "6.0.0"
+mime_guess = "2"
+parking_lot = "0.12.5"
+rusqlite = { version = "0.34", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1.0.229", features = ["derive"] }
+# preserve_order：邀请/接受/转移那几个上游接口对 body 的 key 顺序并不敏感，但保留原序能让
+# 日志里回显的请求体与代码里写的字面量逐字对上，排查 422 时少一层「是不是被重排了」的疑虑。
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["chrono", "env-filter"] }
+# reqwest：出站打 chatgpt.com/backend-api 的那几条。只需 json（请求体/响应体都是 JSON），
+# 不碰指纹对齐那一套（这不是转发代理，是几条一次性的管理动作），故默认 feature 足够。
+reqwest = { version = "0.12.28", features = ["json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

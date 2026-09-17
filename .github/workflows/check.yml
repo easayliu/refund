@@ -1,0 +1,55 @@
+# 排版与测试门禁。照抄同目录 coban 的约定。
+#
+# fmt 刻意与 test 分开：`cargo fmt --check` 不需要编译，也就不需要 admin-ui/dist
+#（rust-embed 在编译期读取该目录），十几秒即可完成，能最快挡住风格漂移。
+name: Check
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: 排版检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # 排版规则由 rustfmt.toml 的 edition 冻结，故不必 pin toolchain 版本。
+      - run: cargo fmt --all -- --check
+
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      # rust-embed 编译期要读 admin-ui/dist。测试不关心前端内容，给个占位目录即可，
+      # 省掉一次几十秒的前端构建。
+      - name: Stub admin-ui/dist
+        run: mkdir -p admin-ui/dist && echo '<!doctype html><title>refund</title>' > admin-ui/dist/index.html
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # reqwest 默认走系统 OpenSSL（openssl-sys），ubuntu runner 自带 libssl-dev / pkg-config，
+      # 不像 coban 那样还要 cmake 编 BoringSSL。
+      - run: cargo test --locked
+
+  frontend:
+    name: 前端类型检查与构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - working-directory: admin-ui
+        run: pnpm install --frozen-lockfile && pnpm build

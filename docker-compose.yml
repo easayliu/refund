@@ -1,0 +1,13 @@
+services:
+  refund:
+    build: .
+    image: refund:latest
+    container_name: refund
+    ports:
+      - "4800:4800"
+    volumes:
+      - ./config:/app/config
+    environment:
+      # 设置后管理页需登录；留空则管理页不鉴权（仅本机可信网络用）。
+      - REFUND_ADMIN_PASSWORD=${REFUND_ADMIN_PASSWORD:-}
+    restart: unless-stopped

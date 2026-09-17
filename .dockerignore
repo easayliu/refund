@@ -1,0 +1,10 @@
+/target
+/admin-ui/node_modules
+/admin-ui/dist
+/config
+*.db
+*.db-wal
+*.db-shm
+*.log
+.git
+.claude
